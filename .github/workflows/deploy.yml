@@ -1,0 +1,120 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: linux
+            asset_name: linux.7z
+          - os: macos-latest
+            artifact_name: mac
+            asset_name: mac.7z
+          - os: windows-latest
+            artifact_name: win
+            asset_name: win.7z
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install 7zip (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Install 7zip (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install p7zip
+
+      # Windows has 7zip installed by default usually, or accessible via choco if needed
+      # but standard runner images usually have it. Let's rely on that or add choco if fails.
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller --onefile --name main main.py
+
+      - name: Prepare Distribution Directory
+        shell: bash
+        run: |
+          mkdir -p dist/${{ matrix.artifact_name }}
+          
+          # Move executable
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            mv dist/main.exe dist/${{ matrix.artifact_name }}/
+          else
+            mv dist/main dist/${{ matrix.artifact_name }}/
+          fi
+          
+          # Copy resources
+          cp AliHYAiHei.ttf dist/${{ matrix.artifact_name }}/
+          cp user.csv dist/${{ matrix.artifact_name }}/
+          cp config.py dist/${{ matrix.artifact_name }}/
+          # Copy `done` directory as `input`
+          cp -r done dist/${{ matrix.artifact_name }}/input
+          # Create empty dirs
+          mkdir -p dist/${{ matrix.artifact_name }}/out dist/${{ matrix.artifact_name }}/done
+
+      - name: Compress artifacts (7z)
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" == "Windows" ]; then
+             path_to_7z="7z" # standard in PATH usually?
+             # Fallback: check program files if needed
+             # Github actions Windows usually has '7z' in path.
+             7z a -t7z "${{ matrix.asset_name }}" "${{ matrix.artifact_name }}"
+          else
+             7z a -t7z "${{ matrix.asset_name }}" "${{ matrix.artifact_name }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate Release Tag
+        id: tag
+        run: echo "TAG_NAME=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_ENV
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: Release ${{ env.TAG_NAME }}
+          files: |
+            artifacts/linux/linux.7z
+            artifacts/mac/mac.7z
+            artifacts/win/win.7z
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
